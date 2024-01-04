@@ -45,9 +45,7 @@ import pascal.taie.ir.stmt.If;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.SwitchStmt;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -70,7 +68,74 @@ public class DeadCodeDetection extends MethodAnalysis {
         // keep statements (dead code) sorted in the resulting set
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
         // Your task is to recognize dead code in ir and add it to deadCode
+        Set<Stmt> liveCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
+        Queue<Stmt> queue = new LinkedList<>();
+        queue.add(cfg.getEntry());
+        while (!queue.isEmpty()) {
+            Stmt stmt = queue.poll();
+            // 2. Dead assignment
+            if (stmt instanceof AssignStmt<?, ?> s && s.getLValue() instanceof Var var) {
+                if (!liveVars.getResult(stmt).contains(var) && hasNoSideEffect(s.getRValue())) {
+                    queue.addAll(cfg.getSuccsOf(stmt));
+                    continue;
+                }
+            }
+            // 1. Unreachable code
+            // 1.1. Control-flow unreachable code
+            if (!liveCode.add(stmt)) {
+                continue;
+            }
+            // 1.2. Unreachable branch
+            if (stmt instanceof If ifStmt) { // (1) If statement
+                Value val = ConstantPropagation.evaluate(ifStmt.getCondition(), constants.getInFact(ifStmt));
+                if (val.isConstant()) {
+                    for (Edge<Stmt> edge : cfg.getOutEdgesOf(ifStmt)) {
+                        if (val.getConstant() == 1 && edge.getKind() == Edge.Kind.IF_TRUE ||
+                                val.getConstant() != 1 && edge.getKind() == Edge.Kind.IF_FALSE) {
+                            queue.add(edge.getTarget());
+                        }
+                    }
+                } else {
+                    queue.addAll(cfg.getSuccsOf(stmt));
+                }
+            } else if (stmt instanceof SwitchStmt switchStmt) { // (2) Switch statement
+                Value val = ConstantPropagation.evaluate(switchStmt.getVar(), constants.getInFact(switchStmt));
+                if (val.isConstant()) {
+                    List<Integer> caseValues = switchStmt.getCaseValues();
+                    boolean isDefault = true;
+                    for (int i = 0; i < caseValues.size(); i++) {
+                        if (val.getConstant() == caseValues.get(i)) {
+                            queue.add(switchStmt.getTarget(i));
+                            isDefault = false;
+                        }
+                    }
+                    if (isDefault) {
+                        queue.add(switchStmt.getDefaultTarget());
+                    }
+                } else {
+                    queue.addAll(cfg.getSuccsOf(stmt));
+                }
+            } else {
+                queue.addAll(cfg.getSuccsOf(stmt));
+            }
+        }
+        for (Stmt stmt : cfg.getNodes()) {
+            if (!liveCode.contains(stmt)) {
+                deadCode.add(stmt);
+            }
+        }
+        deadCode.remove(cfg.getExit());
         return deadCode;
+    }
+
+    private void dfs(Stmt node, Set<Stmt> visited, CFG<Stmt> cfg) {
+        if (visited.contains(node)) {
+            return;
+        }
+        visited.add(node);
+        for (Stmt successor : cfg.getSuccsOf(node)) {
+            dfs(successor, visited, cfg);
+        }
     }
 
     /**
